@@ -1,8 +1,11 @@
+# --- START OF FILE chinese_ime_with_clipboard_refactored.py ---
+
 import tkinter as tk
 from tkinter import ttk, messagebox, font
 import pyperclip
 import json
 import os
+import pickle
 
 
 class ClipboardApp:
@@ -30,6 +33,8 @@ class ClipboardApp:
         
         # 載入歷史和詞彙
         self.load_history()
+        # *** 修改：初始化字典來儲存詞彙，而不是列表 ***
+        self.word_dictionary = {}
         self.load_word_tab()
 
         # 中文輸入候選清單
@@ -767,15 +772,14 @@ class ClipboardApp:
         self.chinese_entry.delete(0, tk.END)
         return "break"
 
+    # *** 修改：使用字典進行高效查詢 ***
     def find_word_matches(self, input_code):
-        """原始的詞語搜尋方法"""
-        matches = []
-        for line in self.word_tab_data:
-            parts = line.split()
-            if len(parts) >= 2 and parts[0] == input_code:
-                matches = parts[1:]
-                break
-        return matches
+        """
+        (重構後) 原始的詞語搜尋方法。
+        現在使用字典進行快速查找，而不是遍歷列表。
+        """
+        # 使用 .get() 方法，如果找不到鍵，就返回一個空列表
+        return self.word_dictionary.get(input_code, [])
 
     def show_selection_dialog(self, matches):
         self.close_selection_dialog()
@@ -929,34 +933,95 @@ class ClipboardApp:
     def handle_letter_input(self, event):
         return
 
+    # *** 修改：重寫此函式以實現快取機制 ***
+    def _parse_and_cache_word_tab(self, cache_file):
+        """
+        (輔助函式) 解析 word.tab，將結果存入 self.word_dictionary，並建立二進位快取檔案。
+        這是「慢速路徑」，只在需要時執行。
+        """
+        temp_dict = {}
+        try:
+            # 1. 從 word.tab 解析文字
+            with open(self.word_tab_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        code = parts[0]
+                        words = parts[1:]
+                        temp_dict[code] = words
+            
+            self.word_dictionary = temp_dict
+
+            # 2. 將新建立的字典寫入快取檔案
+            with open(cache_file, "wb") as f_cache:
+                pickle.dump(self.word_dictionary, f_cache)
+                print("詞庫快取已成功建立/更新。")
+
+        except Exception as e:
+            messagebox.showerror("錯誤", f"讀取 word.tab 或建立快取失敗: {e}")
+            self.word_dictionary = {} # 確保在失敗時字典是空的
+
     def load_word_tab(self):
-        self.word_tab_data = []
-        if os.path.exists(self.word_tab_file):
+        """
+        (重構後) 載入 word.tab 檔案。
+        優先使用二進位快取以加速啟動，僅在原始檔更新或快取不存在時才重新解析。
+        """
+        self.word_dictionary = {}
+        cache_file = self.word_tab_file + ".cache" # 快取檔案名稱
+
+        # 情境一：word.tab 檔案不存在，創建範例檔和初始快取
+        if not os.path.exists(self.word_tab_file):
+            sample_data = {
+                "AA": ["寸", "尺", "分"], "BB": ["公分", "公尺"], "CC": ["很好", "不錯", "棒"],
+                "aaa": ["鑫", "龘", "鑆"], "DD": ["測試"], "ABC": ["第一", "第二", "第三", "第四"],
+                "ABCD": ["甲", "乙", "丙", "丁"], "jou": ["捐", "胡"], "jouv": ["測試V"]
+            }
             try:
-                with open(self.word_tab_file, "r", encoding="utf-8") as f:
-                    self.word_tab_data = [line.strip() for line in f.readlines() if line.strip()]
-            except Exception as e:
-                messagebox.showerror("錯誤", f"讀取 word.tab 失敗: {e}")
-        else:
-            sample_data = [
-                "AA 寸 尺 分",
-                "BB 公分 公尺",
-                "CC 很好 不錯 棒",
-                "aaa 鑫 龘 鑆",
-                "DD 測試",
-                "ABC 第一 第二 第三 第四",
-                "ABCD 甲 乙 丙 丁",
-                "jou 捐 胡",
-                "jouv 測試V"  # 用於測試exact match優先的情況
-            ]
-            try:
+                # 寫入人類可讀的 word.tab
                 with open(self.word_tab_file, "w", encoding="utf-8") as f:
-                    for line in sample_data:
-                        f.write(line + "\n")
-                self.word_tab_data = sample_data
-                messagebox.showinfo("提示", "已創建範例 word.tab 檔案")
+                    for code, words in sample_data.items():
+                        f.write(f"{code} {' '.join(words)}\n")
+                
+                # 寫入二進位快取檔
+                with open(cache_file, "wb") as f_cache:
+                    pickle.dump(sample_data, f_cache)
+
+                self.word_dictionary = sample_data
+                messagebox.showinfo("提示", "已創建範例 word.tab 及快取檔案")
             except Exception as e:
-                messagebox.showerror("錯誤", f"創建 word.tab 失敗: {e}")
+                messagebox.showerror("錯誤", f"創建範例 word.tab 失敗: {e}")
+            return # 完成處理，直接返回
+
+        # 情境二：word.tab 存在，判斷是否使用快取
+        use_cache = False
+        if os.path.exists(cache_file):
+            try:
+                # 比較 word.tab 和快取檔案的最後修改時間
+                word_tab_mtime = os.path.getmtime(self.word_tab_file)
+                cache_mtime = os.path.getmtime(cache_file)
+                if cache_mtime > word_tab_mtime:
+                    use_cache = True
+            except OSError:
+                use_cache = False # 如果無法獲取時間戳，則不使用快取
+
+        if use_cache:
+            # --- 快速路徑：從快取載入 ---
+            print("偵測到有效快取，正在從快取載入詞庫...")
+            try:
+                with open(cache_file, "rb") as f:
+                    self.word_dictionary = pickle.load(f)
+            except Exception as e:
+                # 如果快取檔案損毀或讀取失敗，則退回到慢速路徑
+                print(f"快取讀取失敗: {e}。將從 word.tab 重新解析。")
+                self._parse_and_cache_word_tab(cache_file)
+        else:
+            # --- 慢速路徑：從 word.tab 解析並建立快取 ---
+            print("快取無效或不存在，正在從 word.tab 解析詞庫...")
+            self._parse_and_cache_word_tab(cache_file)
 
     def on_enter(self, event):
         user_input = self.entry.get().strip()
